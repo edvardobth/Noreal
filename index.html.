@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>noreal – AI камера</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; height: 100vh; width: 100vw; overflow: hidden; font-family: -apple-system, sans-serif; }
+    #container { position: relative; width: 100%; height: 100%; }
+    #video, #previewCanvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; }
+    #previewCanvas { pointer-events: none; }
+
+    /* Переключатель камеры */
+    #flipBtn {
+      position: absolute; top: 20px; right: 20px; z-index: 10;
+      background: rgba(0,0,0,0.5); color: white; border: none;
+      border-radius: 50%; width: 44px; height: 44px;
+      font-size: 24px; display: flex; align-items: center; justify-content: center;
+      cursor: pointer; backdrop-filter: blur(5px);
+    }
+
+    /* Индикатор луны */
+    #lunarIndicator {
+      position: absolute; top: 80px; left: 50%; transform: translateX(-50%);
+      color: gold; font-size: 20px; background: rgba(0,0,0,0.6);
+      padding: 5px 15px; border-radius: 20px;
+      display: none; backdrop-filter: blur(5px); z-index: 9;
+      text-shadow: 0 0 10px rgba(255,215,0,0.8);
+    }
+
+    /* Панель управления внизу */
+    .controls {
+      position: absolute; bottom: 30px; left: 0; width: 100%;
+      display: flex; flex-direction: column; align-items: center;
+      gap: 15px; z-index: 10;
+    }
+
+    /* Блок зума */
+    #zoomContainer {
+      display: flex; align-items: center; gap: 10px;
+      width: 80%; max-width: 400px;
+      background: rgba(0,0,0,0.5); border-radius: 20px;
+      padding: 8px 16px; backdrop-filter: blur(10px);
+    }
+    #zoomSlider {
+      flex: 1; height: 6px; -webkit-appearance: none;
+      background: rgba(255,255,255,0.4); border-radius: 3px;
+      outline: none;
+    }
+    #zoomSlider::-webkit-slider-thumb {
+      -webkit-appearance: none; width: 22px; height: 22px;
+      background: white; border-radius: 50%;
+      box-shadow: 0 0 10px rgba(0,0,0,0.5);
+    }
+    #zoomValue {
+      color: white; font-size: 16px; font-weight: bold;
+      min-width: 50px; text-align: center;
+    }
+
+    /* Кнопка спуска */
+    #captureBtn {
+      width: 72px; height: 72px; border-radius: 50%;
+      background: white; border: 4px solid rgba(255,255,255,0.7);
+      font-size: 14px; color: #000; font-weight: bold;
+      transition: transform 0.1s, opacity 0.2s;
+      cursor: pointer; display: flex; align-items: center;
+      justify-content: center; line-height: 1;
+    }
+    #captureBtn:active { transform: scale(0.9); }
+    #captureBtn:disabled { opacity: 0.4; transform: scale(1); }
+
+    /* Прогресс-бар */
+    #progressContainer {
+      position: absolute; bottom: 130px; width: 100%;
+      display: none; justify-content: center; z-index: 10;
+    }
+    #progressBar {
+      width: 70%; max-width: 300px; height: 8px;
+      background: rgba(255,255,255,0.3); border-radius: 4px;
+      overflow: hidden;
+    }
+    #progressFill {
+      width: 0%; height: 100%; background: #4caf50;
+      transition: width 0.3s;
+    }
+
+    /* Всплывающие сообщения */
+    #statusText {
+      position: absolute; top: 50%; left: 50%;
+      transform: translate(-50%, -50%); color: white;
+      font-size: 14px; background: rgba(0,0,0,0.7);
+      padding: 8px 16px; border-radius: 20px;
+      display: none; z-index: 20;
+    }
+  </style>
+</head>
+<body>
+  <div id="container">
+    <video id="video" playsinline autoplay muted></video>
+    <canvas id="previewCanvas"></canvas>
+
+    <!-- Элементы интерфейса -->
+    <button id="flipBtn">🔄</button>
+    <div id="lunarIndicator">🌕 Луна</div>
+
+    <div id="progressContainer">
+      <div id="progressBar"><div id="progressFill"></div></div>
+    </div>
+
+    <div class="controls">
+      <div id="zoomContainer">
+        <span style="color:white; font-size:14px;">1×</span>
+        <input type="range" id="zoomSlider" min="1" max="100" value="1" step="0.1">
+        <span id="zoomValue">1×</span>
+      </div>
+      <button id="captureBtn">Снять</button>
+    </div>
+
+    <div id="statusText"></div>
+  </div>
+
+  <script>
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('previewCanvas');
+    const ctx = canvas.getContext('2d');
+    const zoomSlider = document.getElementById('zoomSlider');
+    const zoomValue = document.getElementById('zoomValue');
+    const captureBtn = document.getElementById('captureBtn');
+    const lunarIndicator = document.getElementById('lunarIndicator');
+    const progressContainer = document.getElementById('progressContainer');
+    const progressFill = document.getElementById('progressFill');
+    const statusText = document.getElementById('statusText');
+    const flipBtn = document.getElementById('flipBtn');
+
+    let currentZoom = 1;
+    let facingMode = 'environment'; // задняя камера
+    let stream = null;
+
+    // Показать статус
+    function showStatus(msg, duration = 1500) {
+      statusText.textContent = msg;
+      statusText.style.display = 'block';
+      setTimeout(() => { statusText.style.display = 'none'; }, duration);
+    }
+
+    // Запуск камеры
+    async function startCamera() {
+      try {
+        if (stream) {
+          stream.getTracks().forEach(track => track.stop());
+        }
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode, width: { ideal: 1920 }, height: { ideal: 1080 } },
+          audio: false
+        });
+        video.srcObject = stream;
+        await video.play();
+
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        requestAnimationFrame(updatePreview);
+      } catch (err) {
+        alert('Ошибка доступа к камере: ' + err.message);
+      }
+    }
+
+    // Переключение камеры
+    flipBtn.addEventListener('click', startCamera);
+
+    // Обновление превью с зумом
+    function updatePreview() {
+      if (!video.videoWidth) {
+        requestAnimationFrame(updatePreview);
+        return;
+      }
+      const w = video.videoWidth;
+      const h = video.videoHeight;
+      const cropW = w / currentZoom;
+      const cropH = h / currentZoom;
+      const offsetX = (w - cropW) / 2;
+      const offsetY = (h - cropH) / 2;
+
+      ctx.drawImage(video, offsetX, offsetY, cropW, cropH, 0, 0, canvas.width, canvas.height);
+
+      // Луна (простая эвристика)
+      if (currentZoom >= 5 && isMoonVisible()) {
+        lunarIndicator.style.display = 'block';
+      } else {
+        lunarIndicator.style.display = 'none';
+      }
+      requestAnimationFrame(updatePreview);
+    }
+
+    function isMoonVisible() {
+      try {
+        const imageData = ctx.getImageData(
+          canvas.width * 0.3, canvas.height * 0.3,
+          canvas.width * 0.4, canvas.height * 0.4
+        );
+        const data = imageData.data;
+        let sum = 0;
+        for (let i = 0; i < data.length; i += 4) {
+          sum += (data[i] + data[i+1] + data[i+2]) / 3;
+        }
+        const avg = sum / (data.length / 4);
+        return avg > 80 && avg < 200;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    // Зум
+    zoomSlider.addEventListener('input', () => {
+      currentZoom = parseFloat(zoomSlider.value);
+      zoomValue.textContent = currentZoom.toFixed(1) + '×';
+    });
+
+    // Снимок (пока без ИИ)
+    captureBtn.addEventListener('click', () => {
+      captureBtn.disabled = true;
+      progressContainer.style.display = 'flex';
+      progressFill.style.width = '0%';
+
+      // Имитация обработки
+      let progress = 0;
+      const interval = setInterval(() => {
+        progress += 5;
+        progressFill.style.width = progress + '%';
+        if (progress >= 100) {
+          clearInterval(interval);
+          finishCapture();
+        }
+      }, 100);
+    });
+
+    function finishCapture() {
+      // Сохраняем оригинальный кадр с кропом
+      const w = video.videoWidth;
+      const h = video.videoHeight;
+      const cropW = w / currentZoom;
+      const cropH = h / currentZoom;
+      const offX = (w - cropW) / 2;
+      const offY = (h - cropH) / 2;
+
+      const captureCanvas = document.createElement('canvas');
+      captureCanvas.width = cropW;
+      captureCanvas.height = cropH;
+      const capCtx = captureCanvas.getContext('2d');
+      capCtx.drawImage(video, offX, offY, cropW, cropH, 0, 0, cropW, cropH);
+
+      const link = document.createElement('a');
+      link.download = `noreal_${Date.now()}.png`;
+      link.href = captureCanvas.toDataURL('image/png');
+      link.click();
+
+      progressContainer.style.display = 'none';
+      captureBtn.disabled = false;
+      showStatus('Фото сохранено');
+    }
+
+    // Старт
+    startCamera();
+  </script>
+</body>
+</html>
